@@ -1,0 +1,159 @@
+// --------------------
+// GLOBAL STATE
+// --------------------
+let running = false;
+const pastSignals = [];
+const MAX_PAST = 20;
+
+// --------------------
+// CREATE SIDEBAR PANEL
+// --------------------
+const panel = document.createElement("div");
+panel.id = "harsi-panel";
+panel.innerHTML = `
+  <button id="startBtn">▶ Start</button>
+  <button id="stopBtn">⏹ Stop</button>
+  <div class="signal-current" id="currentSignal">Stopped</div>
+  <div class="signal-past" id="pastSignals"></div>
+`;
+document.body.appendChild(panel);
+
+// --------------------
+// BUTTON LOGIC
+// --------------------
+document.getElementById("startBtn").onclick = () => {
+  running = true;
+  document.getElementById("currentSignal").innerText = "Running...";
+};
+
+document.getElementById("stopBtn").onclick = () => {
+  running = false;
+  document.getElementById("currentSignal").innerText = "Stopped";
+};
+
+// --------------------
+// GET CANDLES (LIVE) - fallback to mock if needed
+// --------------------
+function getCandles(n) {
+  try {
+    // Attempt to read global chart object
+    const chart = window.Chart || window.chart || window.__chart;
+    if (chart && chart.candles && chart.candles.length >= n) {
+      return chart.candles.slice(-n).map(c => ({
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+        time: c.time
+      }));
+    }
+
+    // Fallback to DOM-based (replace .candle class if needed)
+    const candleEls = document.querySelectorAll(".candle");
+    if (candleEls && candleEls.length >= n) {
+      const arr = [];
+      for (let i = candleEls.length - n; i < candleEls.length; i++) {
+        const el = candleEls[i];
+        arr.push({
+          open: parseFloat(el.dataset.open),
+          high: parseFloat(el.dataset.high),
+          low: parseFloat(el.dataset.low),
+          close: parseFloat(el.dataset.close)
+        });
+      }
+      return arr;
+    }
+
+    // Final fallback: mock
+    const arr = [];
+    for (let i = 0; i < n; i++) {
+      const close = Math.random()*100 + 100;
+      const high = close + Math.random()*2;
+      const low = close - Math.random()*2;
+      arr.push({open: close, high, low, close});
+    }
+    return arr;
+  } catch (e) {
+    console.error("Error reading candles:", e);
+    return null;
+  }
+}
+
+// --------------------
+// HARSI + slope + persistence scoring
+// --------------------
+function computeSignal() {
+  const candles = getCandles(5);
+  if (!candles || candles.length < 5) return { type: "WAIT", confidence: 0 };
+
+  // 1) Slope
+  const slope = (candles[4].close - candles[0].close)/candles[0].close;
+  const slopeScore = Math.min(Math.max(slope * 100, 0), 30);
+
+  // 2) Curvature
+  const prev = candles.slice(0, 3).map(c=>c.close);
+  const mid = candles[3].close;
+  const last = candles[4].close;
+  let curvatureScore = 0;
+  if (mid > Math.max(...prev) && last < mid) curvatureScore = 40; // top → PUT
+  else if (mid < Math.min(...prev) && last > mid) curvatureScore = 40; // bottom → CALL
+
+  // 3) Persistence
+  const persistenceScore = candles.every(c=>c.close!==candles[0].close)?20:0;
+
+  // 4) Volatility
+  const high = Math.max(...candles.map(c=>c.high));
+  const low = Math.min(...candles.map(c=>c.low));
+  const volatilityScore = high - low > 0 ? 10 : 0;
+
+  // Total score
+  const totalScore = slopeScore + curvatureScore + persistenceScore + volatilityScore;
+
+  // Decide signal
+  if (totalScore >= 70) {
+    const type = mid < last ? "CALL" : "PUT";
+    return { type, confidence: totalScore };
+  } else {
+    return { type: "WAIT", confidence: totalScore };
+  }
+}
+
+// --------------------
+// PLOT SIGNAL MARKERS
+// --------------------
+function plotSignal(signal) {
+  const marker = document.createElement("div");
+  marker.className = `signal-marker ${signal.type.toLowerCase()}-signal`;
+  marker.innerText = signal.type === "CALL" ? "▲" : signal.type === "PUT" ? "▼" : "";
+
+  const chart = document.querySelector("canvas"); // adjust if needed
+  if (!chart) return;
+  const rect = chart.getBoundingClientRect();
+  marker.style.left = rect.left + rect.width - 50 + "px";
+  marker.style.top = rect.top + 50 + "px";
+  document.body.appendChild(marker);
+
+  pastSignals.push({...signal, time: new Date().toLocaleTimeString()});
+  if (pastSignals.length > MAX_PAST) pastSignals.shift();
+  updatePastSignalsPanel();
+}
+
+// --------------------
+// UPDATE PAST SIGNALS PANEL
+// --------------------
+function updatePastSignalsPanel() {
+  const container = document.getElementById("pastSignals");
+  container.innerHTML = pastSignals.map(s => `[${s.time}] ${s.type} ${s.confidence? s.confidence+"%":""}`).join("<br>");
+}
+
+// --------------------
+// MAIN LOOP
+// --------------------
+setInterval(() => {
+  if (!running) return;
+  const signal = computeSignal();
+  const el = document.getElementById("currentSignal");
+  el.innerText = signal.type + (signal.confidence? " ("+signal.confidence+"%)":"");
+  el.className = `signal-current ${signal.type.toLowerCase()}-signal`;
+  if(signal.type==="CALL" || signal.type==="PUT") plotSignal(signal);
+}, 2000);
